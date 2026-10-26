@@ -17,6 +17,8 @@ tags:
 sources:
   - id: openwiki-source-6d4b4e707b8d60b6ccfa3425
     resource: repo://.github/workflows/openwiki-update.yml
+  - id: openwiki-source-aef084bf3022fb942ad29b90
+    resource: repo://examples/openwiki-update-auto-merge.yml
   - id: openwiki-source-0f426585cfb8a1150869ea30
     resource: repo://examples/openwiki-update.bitbucket-pipelines.yml
   - id: openwiki-source-d9da31b32fa9d32e1fa4564b
@@ -29,14 +31,16 @@ sources:
     resource: repo://src/cli/commands.ts
   - id: openwiki-source-106c72a9cb6dd904077fc747
     resource: repo://src/cli/runners.ts
+  - id: openwiki-source-278e7e180eac811fc1a24f7a
+    resource: repo://src/config/constants.ts
   - id: openwiki-source-c923e23504de7a6af7799a24
     resource: repo://src/scheduling/schedules.ts
   - id: openwiki-source-7cf549510278a62e11ae8280
     resource: repo://test/scheduling/schedules.test.ts
-generated: { by: "openwiki/0.4.3", at: "2026-08-28T03:39:43.412Z" }
+generated: { by: "openwiki/0.7.1", at: "2026-10-07T08:10:39.081Z" }
 verified:
-  - by: openwiki/0.4.3
-    at: 2026-08-28T03:39:43.412Z
+  - by: openwiki/0.7.1
+    at: 2026-10-07T08:10:39.081Z
 ---
 
 # CI Scheduling and Self-Update
@@ -56,11 +60,11 @@ Both surfaces share the same cron parsing and validation code in
 lifecycle of a native schedule, and what the CI example files do.
 
 For the CLI surface that drives these flows see
-[CLI reference](/openwiki/operations/cli-reference.md); for what
+[CLI reference](./cli-reference.md); for what
 `code --update` actually regenerates see
-[repository generation](/openwiki/workflows/repository-generation.md); and for
+[repository generation](../workflows/repository-generation.md); and for
 the ingestion side used by native schedules see
-[personal ingestion](/openwiki/workflows/personal-ingestion.md).
+[personal ingestion](../workflows/personal-ingestion.md).
 
 ## Cron parsing and validation
 
@@ -169,14 +173,22 @@ macOS-only.
 
 The recommended way to keep a committed repository wiki fresh is a scheduled CI
 job that runs `openwiki code --update`. Example configurations ship for the three
-supported CI systems:
+supported CI systems, plus a GitHub Actions variant that auto-merges successful
+update PRs:
 
-- `examples/openwiki-update.yml` — GitHub Actions
-- `examples/openwiki-update.gitlab-ci.yml` — GitLab CI
-- `examples/openwiki-update.bitbucket-pipelines.yml` — Bitbucket Pipelines
+- `examples/openwiki-update.yml` — GitHub Actions (canonical example).
+- `examples/openwiki-update-auto-merge.yml` — GitHub Actions variant that
+  enables auto-merge for the update PR.
+- `examples/openwiki-update.gitlab-ci.yml` — GitLab CI.
+- `examples/openwiki-update.bitbucket-pipelines.yml` — Bitbucket Pipelines.
 
 The live workflow the OpenWiki repository itself runs is
-`.github/workflows/openwiki-update.yml`.
+`.github/workflows/openwiki-update.yml`, which builds from the checked-out
+source to dogfood unreleased changes rather than installing the published
+package. The OpenWiki repository also runs its own release pipeline in
+`.github/workflows/release.yml`, the npm trusted-publishing pipeline; the
+examples above are what an external repository should copy, and the live repo
+runs both workflows separately.
 
 ### What the scheduled job does
 
@@ -200,11 +212,20 @@ Every example follows the same shape:
    `CLAUDE.md`, and the workflow file) and exit early with "OpenWiki is already up
    to date." when there is no diff; otherwise they create a branch, commit,
    push, and open a merge/pull request through the provider's REST API.
+4. **Annotate and propagate the outcome.** All GitHub workflows emit a run
+   notice linking the created PR (`::notice title=OpenWiki update pull request`)
+   when a PR was opened, then a trailing **"Propagate OpenWiki failure"** step
+   runs `exit 1` when the update outcome is `failure` so a real error is not
+   hidden by the partial PR. The GitLab and Bitbucket examples end at the
+   merge/pull-request API call.
 
 The PR is scoped to the documentation paths (`openwiki`, `AGENTS.md`, `CLAUDE.md`,
 and the workflow file), branched under `openwiki/update` (GitHub) or
 `openwiki/update-<pipeline id>` (GitLab/Bitbucket), with the commit and title
-`docs: update OpenWiki`.
+`docs: update OpenWiki`. On GitHub, the workflow path is listed only when present
+(`AGENTS.md` and `CLAUDE.md` are optional); the explicit `git diff --quiet` check
+in the GitLab and Bitbucket examples lists the fixed path set including the
+workflow file.
 
 The GitHub example also models a **failure-tolerant** run. The `openwiki code
 --update` step sets `continue-on-error: true` so a failed generation does not
@@ -217,6 +238,84 @@ trailing **"Propagate OpenWiki failure"** step (`exit 1` when the outcome is
 Both the example and the live workflow delete the transient `openwiki/.run.json`
 run-state file before creating the PR, so the partial progress that survives is
 the committed wiki, not leftover in-process state.
+
+#### Trace thread per update
+
+Each scheduled update is one repository run, and OpenWiki groups all of that
+run's traces into a single LangSmith thread so the planner and the per-page
+workers collapse into one grouped trace rather than one root trace per agent.
+The thread id is the run's durable `runId` (which a resumed run keeps),
+overridable via the `OPENWIKI_TRACE_THREAD_ID` environment variable. Because CI
+runs are not resumed (see the caveat below), the default run id already gives one
+thread per scheduled update. The override exists so CI can name the thread after
+the change that caused it — for example, deriving a thread id from the commit
+that triggered the run — but none of the shipped example or live workflows set
+it today. The planner agent streams as `"planning agent"` and each page worker as
+`"worker agent: <page>"` within that shared thread; because repository workers
+have no checkpointer, sharing one thread id across concurrent workers is safe —
+it only affects LangSmith grouping, not execution state.
+
+#### Auto-merge variant
+
+`examples/openwiki-update-auto-merge.yml` extends the canonical GitHub Actions
+example with two extra steps that manage the PR's auto-merge state through the
+`gh` CLI after the PR is created:
+
+- **Enable auto-merge after a successful update** runs `gh pr merge --auto
+  --squash` when `steps.openwiki.outcome == 'success'` and a PR was created
+  (`steps.create-pr.outputs.pull-request-number` is non-empty).
+- **Disable auto-merge after a failed update** runs `gh pr merge --disable-auto`
+  when the outcome is `failure` and a PR was created, so the partial-progress PR
+  opened on a failed run is not silently auto-merged; a reviewer must still
+  review and merge it manually.
+
+The `Propagate OpenWiki failure` step still runs after both, so a failed run
+fails the job and the next scheduled run starts fresh.
+
+The auto-merge variant differs from the canonical `examples/openwiki-update.yml`
+in three ways beyond the auto-merge steps:
+
+1. **PR token.** It authenticates both `peter-evans/create-pull-request` and `gh`
+   with a dedicated `OPENWIKI_PR_TOKEN` secret (the canonical example relies on
+   the default `GITHUB_TOKEN`). The token needs `pull-requests: write` to enable
+   auto-merge.
+2. **Workflow file excluded from the PR.** `code --update` regenerates the
+   workflow file from an internal template, which would otherwise drop the
+   fork guard on the live repo. The variant restores the protected file with
+   `git checkout -- .github/workflows/openwiki-update.yml` before the PR step
+   (`if: ${{ !cancelled() }}`) and omits it from `add-paths`, so only
+   `openwiki`, `AGENTS.md`, and `CLAUDE.md` are committed.
+3. **Concurrency control.** It adds a `concurrency` group
+   (`openwiki-update`, `cancel-in-progress: false`) so overlapping scheduled and
+   manual runs queue rather than clobber each other, and pins
+   `peter-evans/create-pull-request` to the v8.1.1 commit SHA
+   (`5f6978faf089d4d20b00c7766989d076bb2fc7f1`).
+
+#### Auto-merge setup requirements
+
+Auto-merge is repository infrastructure rather than an OpenWiki runtime
+feature: the example creates a docs-only PR and only enables GitHub auto-merge
+after OpenWiki finishes successfully, so required branch checks and reviews
+still gate when the PR actually merges. Before using the variant, configure the
+repository once:
+
+1. Enable **Allow auto-merge** in the repository's pull request settings.
+2. Add branch protection or a ruleset for the default branch. Require the
+   checks that should gate generated docs, and decide whether OpenWiki PRs still
+   require human review.
+3. Create a fine-grained personal access token or GitHub App token scoped to the
+   target repository with permissions for **Contents: read and write** and
+   **Pull requests: read and write**, and save it as the `OPENWIKI_PR_TOKEN`
+   Actions secret.
+4. Copy the example to `.github/workflows/openwiki-update.yml`, pin the OpenWiki
+   version and provider, and add the provider secret.
+
+The dedicated token is deliberate: pull requests created with the default
+`GITHUB_TOKEN` do not start most `pull_request` workflows, so required PR checks
+may never run. Organization policies may require a GitHub App token instead of a
+personal access token. Keep the workflow's `add-paths` restricted to generated
+documentation, pin every action and package version, and do not auto-merge
+changes to executable workflow files.
 
 ### Scheduling and gating
 
@@ -234,17 +333,29 @@ the committed wiki, not leftover in-process state.
 
 The live GitHub workflow also builds OpenWiki from the checked-out source and
 runs `node dist/cli/cli.js code --update` rather than the published package, so
-the daily run dogfoods unreleased changes. This is the key difference between the
-two GitHub workflows: `examples/openwiki-update.yml` installs the published
+the daily run dogfoods unreleased changes. This is the key difference between
+the three GitHub workflows: `examples/openwiki-update.yml` installs the published
 `openwiki` package globally (`npm install --global openwiki …`) and is what an
-external repository should copy, whereas `.github/workflows/openwiki-update.yml`
-runs `pnpm install --frozen-lockfile && pnpm build` against the checked-out
-OpenWiki source to dogfood main. The live workflow additionally restores the
-protected workflow file with `git checkout -- .github/workflows/openwiki-update.yml`
-after the run because `code --update` regenerates that file from an internal
-template and would otherwise drop the fork guard; the discard runs
-`if: ${{ !cancelled() }}` so the guard survives whether the run succeeded or
-failed.
+external repository should copy; `examples/openwiki-update-auto-merge.yml` does
+the same but adds the auto-merge/disable-auto-merge pattern; whereas
+`.github/workflows/openwiki-update.yml` runs `pnpm install --frozen-lockfile &&
+pnpm build` against the checked-out OpenWiki source to dogfood main. The live
+workflow additionally enables the Socket Firewall (`socketdev/action` in
+`firewall-free` mode) before installing dependencies, restores the protected
+workflow file with `git checkout --
+.github/workflows/openwiki-update.yml` after the run because `code --update`
+regenerates that file from an internal template and would otherwise drop the
+fork guard; the discard runs `if: ${{ !cancelled() }}` so the guard survives
+whether the run succeeded or failed.
+
+The dogfood run is currently configured for OpenRouter with the model
+`z-ai/glm-5.2` (`OPENWIKI_PROVIDER: openrouter`, `OPENWIKI_MODEL_ID:
+z-ai/glm-5.2`, keyed by `OPENROUTER_API_KEY`). The workflow file documents a
+GitHub Copilot alternative in comments: set the `COPILOT_API_KEY` repository
+secret (a GitHub OAuth token) and switch to `OPENWIKI_PROVIDER: copilot` with
+`OPENWIKI_MODEL_ID: claude-sonnet-5`. The published-package examples use the
+same OpenRouter/GLM defaults, so external repositories can keep them or
+substitute their own provider and model.
 
 ### Ephemeral-runner resume caveat
 
@@ -257,11 +368,35 @@ only helps on a persistent checkout (for example a developer's machine). This is
 why the CI examples treat each run as a full pass and rely on the committed wiki,
 plus full git history, as the only durable state carried between runs.
 
+## Focused tests
+
+The pure cron and power-schedule surface of `src/scheduling/schedules.ts` is
+pinned by `test/scheduling/schedules.test.ts`, which deliberately excludes the
+`launchctl`/`pmset`-shelling install/list/pause/resume/delete helpers (those
+belong in integration tests):
+
+- `validateCronExpression` — accepts a valid five-field expression and describes
+  it (`0 2 * * *` → `2:00 AM`), collapses surrounding/repeated whitespace before
+  validating, rejects empty/whitespace-only input with the
+  `Enter a cron expression like 0 2 * * *.` guidance, and rejects unparseable
+  input while echoing back what was entered.
+- `getSuggestedCronExpression` — returns the saved ingestion expression when one
+  exists, otherwise falls back to `0 2 * * *` (2 AM daily).
+- `describeCronExpression` — renders a twelve-hour human description and throws
+  on an unparseable expression rather than returning junk.
+- `getSavedPowerScheduleStatus` — returns `null` when no `pmset` schedule is
+  saved and mirrors the saved `pmset` fields into a status object otherwise.
+
+The shared LangSmith thread grouping that gives one trace thread per update is
+pinned by the repository-runner suite, not the scheduling suite; see
+[repository generation](../workflows/repository-generation.md) and
+[testing overview](../testing/overview.md) for those tests.
+
 ## Related pages
 
-- [CLI reference](/openwiki/operations/cli-reference.md) — the `cron`, `ingest`,
+- [CLI reference](./cli-reference.md) — the `cron`, `ingest`,
   and `code --update` commands invoked by these schedules.
-- [Repository generation](/openwiki/workflows/repository-generation.md) — what
+- [Repository generation](../workflows/repository-generation.md) — what
   `code --update` regenerates and its resumable page-job architecture.
-- [Personal ingestion](/openwiki/workflows/personal-ingestion.md) — the
+- [Personal ingestion](../workflows/personal-ingestion.md) — the
   ingestion run that native macOS schedules trigger.

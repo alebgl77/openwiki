@@ -5,15 +5,7 @@ import {
   type BigIntStats,
   type Dirent,
 } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  readlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, open, readdir, readFile, readlink } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -21,6 +13,7 @@ import {
   PAGE_MANIFEST_PATH,
   UPDATE_METADATA_PATH,
 } from "../config/constants.js";
+import { writeTextAtomic } from "../integrations/install/atomic-file.js";
 import {
   isExpectedSnapshotRaceError,
   isFileNotFoundError,
@@ -230,12 +223,7 @@ export async function writeLastUpdateMetadata(
     ...(language ? { language } : {}),
   };
 
-  await mkdir(path.dirname(metadataFile), { recursive: true });
-  await writeFile(
-    metadataFile,
-    `${JSON.stringify(metadata, null, 2)}\n`,
-    "utf8",
-  );
+  await writeTextAtomic(metadataFile, `${JSON.stringify(metadata, null, 2)}\n`);
 }
 
 /**
@@ -660,10 +648,11 @@ function isSameFingerprintRegularFile(
   // Windows can report different dev/ino values for the same file depending on
   // which stat API produced them. Keep the same-file guard, but use metadata
   // that is stable across lstat() and FileHandle.stat() on that platform.
+  // ctimeNs can change for the same file between those calls on Windows, so it
+  // cannot participate in this fallback identity check.
   return (
     openedStats.size === inspectedStats.size &&
     openedStats.mtimeNs === inspectedStats.mtimeNs &&
-    openedStats.ctimeNs === inspectedStats.ctimeNs &&
     openedStats.birthtimeNs === inspectedStats.birthtimeNs
   );
 }

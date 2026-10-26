@@ -42,6 +42,28 @@ describe("getErrorDiagnostics", () => {
     expect(lookup.httpStatusFromMessage).toBe("503");
   });
 
+  test("extracts the stack in debug mode and omits it when debug is off", () => {
+    const error = new Error("boom");
+
+    expect(toLookup(getErrorDiagnostics(error)).stack).toBeUndefined();
+
+    process.env[DEBUG] = "1";
+
+    expect(toLookup(getErrorDiagnostics(error)).stack).toContain("at ");
+  });
+
+  test("redacts and truncates the stack", () => {
+    process.env[DEBUG] = "1";
+    const error = new Error("boom");
+    error.stack = `Error: boom\n    at call (bearer sk-or-v1-supersecret)\n${"    at frame\n".repeat(300)}`;
+    const stack = toLookup(getErrorDiagnostics(error)).stack;
+
+    expect(stack).not.toContain("sk-or-v1-supersecret");
+    expect(stack).toContain("[REDACTED:OPENROUTER_API_KEY]");
+    expect(stack).toHaveLength(2_000);
+    expect(stack.endsWith("...")).toBe(true);
+  });
+
   test("extracts status and case-insensitive headers in debug mode", () => {
     process.env[DEBUG] = "1";
     const lookup = toLookup(
@@ -88,6 +110,44 @@ describe("getErrorDiagnostics", () => {
     expect(lookup["metadata.previous_errors.5"]).toBeUndefined();
     expect(lookup["metadata.previous_errors.more"]).toBe(
       "2 more previous provider errors",
+    );
+  });
+
+  test("extracts the innermost cause of a wrapped connection error", () => {
+    // A failed provider request: middleware wrappers, the SDK's
+    // "Connection error.", undici's "fetch failed", then the system error.
+    const networkError = Object.assign(
+      new Error("getaddrinfo ENOTFOUND api.example.invalid"),
+      { code: "ENOTFOUND" },
+    );
+    const error = new Error("Connection error.", {
+      cause: new Error("Connection error.", {
+        cause: new Error("Connection error.", {
+          cause: new TypeError("fetch failed", { cause: networkError }),
+        }),
+      }),
+    });
+
+    expect(
+      toLookup(getErrorDiagnostics(error))["rootCause.message"],
+    ).toBeUndefined();
+
+    process.env[DEBUG] = "1";
+    const lookup = toLookup(getErrorDiagnostics(error));
+
+    expect(lookup["rootCause.message"]).toBe(
+      "getaddrinfo ENOTFOUND api.example.invalid",
+    );
+    expect(lookup["rootCause.code"]).toBe("ENOTFOUND");
+  });
+
+  test("redacts the root cause message and stops on a cause cycle", () => {
+    process.env[DEBUG] = "1";
+    const error = new Error("outer");
+    error.cause = new Error("key sk-or-v1-supersecret", { cause: error });
+
+    expect(toLookup(getErrorDiagnostics(error))["rootCause.message"]).toBe(
+      "key [REDACTED:OPENROUTER_API_KEY]",
     );
   });
 

@@ -29,9 +29,11 @@ export interface ErrorDiagnostic {
  * Extracts a deduped list of allowlisted, non-secret diagnostic fields from an
  * arbitrary (often untrusted) error object for the `--debug` diagnostics panel.
  * Only known-safe keys are read; every value is sanitized and secret-like keys
- * are redacted, so raw secret material never leaves. Walks the error, its
+ * are redacted, so raw secret material never leaves. In debug mode this
+ * includes the error's stack, sanitized and truncated like every other
+ * long value. Walks the error, its
  * OpenRouter metadata, any attached debug payload, and (in debug mode) its
- * `cause`/`error`/`response` nesting.
+ * `cause`/`error`/`response` nesting and the innermost `cause`.
  */
 export function getErrorDiagnostics(error: unknown): ErrorDiagnostic[] {
   const diagnostics: ErrorDiagnostic[] = [];
@@ -42,6 +44,13 @@ export function getErrorDiagnostics(error: unknown): ErrorDiagnostic[] {
       { label: "name", value: error.name },
       { label: "message", value: sanitizeDiagnosticText(error.message) },
     );
+
+    if (error.stack) {
+      diagnostics.push({
+        label: "stack",
+        value: truncateDiagnosticValue(sanitizeDiagnosticText(error.stack)),
+      });
+    }
 
     const messageStatus = error.message.match(/\b([45]\d{2})\b/)?.[1];
 
@@ -63,11 +72,49 @@ export function getErrorDiagnostics(error: unknown): ErrorDiagnostic[] {
   if (debugMode) {
     addSafeObjectDiagnostics(diagnostics, error, "");
     addSafeNestedDiagnostics(diagnostics, error, "cause");
+    addRootCauseDiagnostics(diagnostics, error);
     addSafeNestedDiagnostics(diagnostics, error, "error");
     addSafeNestedDiagnostics(diagnostics, error, "response");
   }
 
   return dedupeDiagnostics(diagnostics);
+}
+
+/**
+ * Reports the innermost error of the `cause` chain as `rootCause`: its
+ * sanitized message plus the allowlisted fields. Agent middleware wraps a
+ * failed model call several times, copying the message each time, so a request
+ * that never connects reads as the SDK's "Connection error." at every level
+ * above the one that explains it (DNS, a refused connection, TLS).
+ */
+function addRootCauseDiagnostics(
+  diagnostics: ErrorDiagnostic[],
+  error: Record<string, unknown>,
+): void {
+  const seen = new Set<unknown>([error]);
+  let rootCause: Record<string, unknown> | undefined;
+  let candidate = error.cause;
+
+  while (isRecord(candidate) && !seen.has(candidate)) {
+    seen.add(candidate);
+    rootCause = candidate;
+    candidate = candidate.cause;
+  }
+
+  if (!rootCause) {
+    return;
+  }
+
+  if (typeof rootCause.message === "string" && rootCause.message.length > 0) {
+    diagnostics.push({
+      label: "rootCause.message",
+      value: sanitizeDiagnosticText(rootCause.message),
+    });
+  }
+
+  addSafeObjectDiagnostics(diagnostics, rootCause, "rootCause");
+  addOpenRouterMetadataDiagnostics(diagnostics, rootCause, "rootCause");
+  addAttachedDebugDiagnostics(diagnostics, rootCause, "rootCause");
 }
 
 function addSafeNestedDiagnostics(

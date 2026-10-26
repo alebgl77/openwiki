@@ -13,10 +13,14 @@ import {
   ANTHROPIC_API_KEY_ENV_KEY,
   ANTHROPIC_BASE_URL_ENV_KEY,
   BASETEN_BASE_URL_ENV_KEY,
+  BOB_BASE_URL_ENV_KEY,
   FIREWORKS_BASE_URL_ENV_KEY,
   NVIDIA_BASE_URL_ENV_KEY,
   OPENWIKI_BEDROCK_MAX_TOKENS_ENV_KEY,
   OPENAI_COMPATIBLE_BASE_URL_ENV_KEY,
+  OPENAI_COMPATIBLE_AUTH_ENV_KEY,
+  OPENAI_COMPATIBLE_ENTRA_SCOPE_ENV_KEY,
+  OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY,
   OPENAI_COMPATIBLE_STREAMING_ENV_KEY,
   OPENAI_COMPATIBLE_USE_RESPONSES_API_ENV_KEY,
   OPENAI_API_KEY_ENV_KEY,
@@ -58,9 +62,13 @@ const KEYS_UNDER_TEST = [
   ANTHROPIC_API_KEY_ENV_KEY,
   ANTHROPIC_BASE_URL_ENV_KEY,
   BASETEN_BASE_URL_ENV_KEY,
+  BOB_BASE_URL_ENV_KEY,
   FIREWORKS_BASE_URL_ENV_KEY,
   NVIDIA_BASE_URL_ENV_KEY,
   OPENAI_COMPATIBLE_BASE_URL_ENV_KEY,
+  OPENAI_COMPATIBLE_AUTH_ENV_KEY,
+  OPENAI_COMPATIBLE_ENTRA_SCOPE_ENV_KEY,
+  OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY,
   OPENAI_COMPATIBLE_STREAMING_ENV_KEY,
   OPENAI_COMPATIBLE_USE_RESPONSES_API_ENV_KEY,
   OPENAI_API_KEY_ENV_KEY,
@@ -426,6 +434,24 @@ describe("getSavedEnvValue", () => {
 });
 
 describe("getCredentialDiagnostics", () => {
+  test("shows auth mode and scope as readable configuration", async () => {
+    await env.saveOpenWikiEnv({
+      [OPENAI_COMPATIBLE_AUTH_ENV_KEY]: "entra-id",
+      [OPENAI_COMPATIBLE_ENTRA_SCOPE_ENV_KEY]: "api://gateway/.default",
+    });
+
+    const diagnostics = await env.getCredentialDiagnostics();
+    expect(
+      diagnostics.find((entry) => entry.key === OPENAI_COMPATIBLE_AUTH_ENV_KEY)
+        ?.preview,
+    ).toBe('"entra-id"');
+    expect(
+      diagnostics.find(
+        (entry) => entry.key === OPENAI_COMPATIBLE_ENTRA_SCOPE_ENV_KEY,
+      )?.preview,
+    ).toBe('"api://gateway/.default"');
+  });
+
   test("includes the provider and each credential key in display order", async () => {
     const diagnostics = await env.getCredentialDiagnostics();
     const keys = diagnostics.map((entry) => entry.key);
@@ -434,6 +460,7 @@ describe("getCredentialDiagnostics", () => {
     expect(keys).toContain(OPENAI_API_KEY_ENV_KEY);
     expect(keys).toContain(ANTHROPIC_API_KEY_ENV_KEY);
     expect(keys).toContain(BASETEN_BASE_URL_ENV_KEY);
+    expect(keys).toContain(BOB_BASE_URL_ENV_KEY);
     expect(keys).toContain(FIREWORKS_BASE_URL_ENV_KEY);
     expect(keys).toContain(NVIDIA_BASE_URL_ENV_KEY);
     expect(keys).toContain(OPENROUTER_API_KEY_ENV_KEY);
@@ -471,6 +498,7 @@ describe("getCredentialDiagnostics", () => {
     await env.saveOpenWikiEnv({
       [ANTHROPIC_BASE_URL_ENV_KEY]: "https://gateway.example.com/anthropic",
       [BASETEN_BASE_URL_ENV_KEY]: "https://gateway.example.com/baseten/v1",
+      [BOB_BASE_URL_ENV_KEY]: "https://gateway.example.com/bob/v1",
     });
 
     const diagnostics = await env.getCredentialDiagnostics();
@@ -480,6 +508,9 @@ describe("getCredentialDiagnostics", () => {
     const basetenEntry = diagnostics.find(
       (item) => item.key === BASETEN_BASE_URL_ENV_KEY,
     );
+    const bobEntry = diagnostics.find(
+      (item) => item.key === BOB_BASE_URL_ENV_KEY,
+    );
 
     expect(anthropicEntry?.preview).toBe(
       '"https://gateway.example.com/anthropic"',
@@ -487,6 +518,7 @@ describe("getCredentialDiagnostics", () => {
     expect(basetenEntry?.preview).toBe(
       '"https://gateway.example.com/baseten/v1"',
     );
+    expect(bobEntry?.preview).toBe('"https://gateway.example.com/bob/v1"');
   });
 
   test("flags an invalid model ID with a warning", async () => {
@@ -604,6 +636,16 @@ describe("getCredentialDiagnostics", () => {
     );
   });
 
+  test("validates the Bob base URL as a non-secret setting", async () => {
+    await env.saveOpenWikiEnv({ [BOB_BASE_URL_ENV_KEY]: "not-a-url" });
+
+    const diagnostics = await env.getCredentialDiagnostics();
+    const entry = diagnostics.find((item) => item.key === BOB_BASE_URL_ENV_KEY);
+
+    expect(entry?.preview).toBe('"not-a-url"');
+    expect(entry?.warnings).toContain("invalid base URL");
+  });
+
   test("surfaces and validates the OpenAI-compatible Responses API opt-in", async () => {
     await env.saveOpenWikiEnv({
       [OPENAI_COMPATIBLE_USE_RESPONSES_API_ENV_KEY]: BOOLEAN_TRUE_ENV_VALUE,
@@ -637,6 +679,50 @@ describe("getCredentialDiagnostics", () => {
     diagnostics = await env.getCredentialDiagnostics();
     entry = diagnostics.find(
       (item) => item.key === OPENAI_COMPATIBLE_USE_RESPONSES_API_ENV_KEY,
+    );
+
+    expect(entry?.preview).toBe(JSON.stringify(MALFORMED_BOOLEAN_ENV_VALUE));
+    expect(entry?.warnings).toContain(INVALID_BOOLEAN_WARNING);
+  });
+
+  test("surfaces and validates the OpenAI-compatible reasoning effort opt-in", async () => {
+    await env.saveOpenWikiEnv({
+      [OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY]:
+        BOOLEAN_TRUE_ENV_VALUE,
+    });
+
+    let diagnostics = await env.getCredentialDiagnostics();
+    let entry = diagnostics.find(
+      (item) =>
+        item.key === OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY,
+    );
+
+    expect(entry?.preview).toBe(JSON.stringify(BOOLEAN_TRUE_ENV_VALUE));
+    expect(entry?.warnings).toEqual([]);
+
+    await env.saveOpenWikiEnv({
+      [OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY]:
+        BOOLEAN_FALSE_ENV_VALUE,
+    });
+
+    diagnostics = await env.getCredentialDiagnostics();
+    entry = diagnostics.find(
+      (item) =>
+        item.key === OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY,
+    );
+
+    expect(entry?.preview).toBe(JSON.stringify(BOOLEAN_FALSE_ENV_VALUE));
+    expect(entry?.warnings).toEqual([]);
+
+    await env.saveOpenWikiEnv({
+      [OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY]:
+        MALFORMED_BOOLEAN_ENV_VALUE,
+    });
+
+    diagnostics = await env.getCredentialDiagnostics();
+    entry = diagnostics.find(
+      (item) =>
+        item.key === OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED_ENV_KEY,
     );
 
     expect(entry?.preview).toBe(JSON.stringify(MALFORMED_BOOLEAN_ENV_VALUE));
